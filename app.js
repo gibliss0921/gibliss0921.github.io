@@ -729,6 +729,9 @@
     const weight = bold ? 700 : baseWeight;
     return `${italic ? "italic " : ""}${weight} ${fontSize}px ${FONT_STACKS[font]}`;
   }
+  function metadataBaseWeight(font) {
+    return font === "sans" ? 500 : 400;
+  }
   function drawRichLine(context, runs, y, contentLeft, contentWidth, align, font, fontSize, baseWeight = 400) {
     const widths = runs.map((run) => {
       context.font = fontValue(fontSize, font, run.bold, run.italic, baseWeight);
@@ -784,9 +787,9 @@
           layout.contentLeft,
           layout.contentWidth,
           input.style.align,
-          "sans",
+          input.style.font,
           layout.metadataFontSize,
-          500
+          metadataBaseWeight(input.style.font)
         );
       }
       context.globalAlpha = 1;
@@ -801,7 +804,7 @@
           document.fonts.load(fontValue(input.style.fontSize, input.style.font, false, false), sample),
           document.fonts.load(fontValue(input.style.fontSize, input.style.font, true, false), sample),
           document.fonts.load(fontValue(input.style.fontSize, input.style.font, false, true), sample),
-          document.fonts.load(fontValue(Math.max(16, Math.round(input.style.fontSize * 0.5)), "sans", false, false, 500), sample)
+          document.fonts.load(fontValue(Math.max(16, Math.round(input.style.fontSize * 0.5)), input.style.font, false, false, metadataBaseWeight(input.style.font)), sample)
         ]);
         await document.fonts.ready;
       } catch {
@@ -816,7 +819,7 @@
       return measureContext.measureText(text).width;
     };
     const metadataMeasure = (text, bold = false, italic = false, fontSize = metadataFontSize) => {
-      measureContext.font = fontValue(fontSize, "sans", bold, italic, 500);
+      measureContext.font = fontValue(fontSize, input.style.font, bold, italic, metadataBaseWeight(input.style.font));
       const width = measureContext.measureText(text).width;
       return width;
     };
