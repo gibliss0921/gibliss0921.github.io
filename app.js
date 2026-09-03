@@ -543,7 +543,10 @@
       {
         family: BUNDLED_FONT_FAMILIES.ridi,
         weight: "400",
-        url: "https://cdn.jsdelivr.net/gh/webfontworld/ridi/RidiBatang.woff2"
+        sources: [
+          { url: "https://cdn.jsdelivr.net/gh/TetraTheta/RIDIBatang-subset/dist/webfont/RIDIBatang-subset.woff2", format: "woff2" },
+          { url: "https://ridicorp.com/wp-content/themes/ridicorp/css/font/RIDIBatang.otf", format: "opentype" }
+        ]
       }
     ],
     sans: [
@@ -593,9 +596,12 @@
     if (typeof FontFace === "undefined" || typeof document === "undefined" || !("fonts" in document)) {
       return Promise.resolve();
     }
+    const source = Array.isArray(definition.sources)
+      ? definition.sources.map((item) => `url(${item.url}) format("${item.format}")`).join(", ")
+      : `url(${definition.url}) format("woff2")`;
     const pending = new FontFace(
       definition.family,
-      `url(${definition.url}) format("woff2")`,
+      source,
       { style: "normal", weight: definition.weight }
     ).load().then((face) => {
       document.fonts.add(face);
