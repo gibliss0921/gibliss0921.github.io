@@ -1,7 +1,7 @@
 (function() {
   "use strict";
   const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
-  const FONT_KEYS = ["serif", "sans", "rounded", "mono"];
+  const FONT_KEYS = ["serif", "ridi", "sans", "rounded", "mono"];
   const ALIGN_KEYS = ["left", "center"];
   const TEXTURE_KEYS = ["none", "grain", "stars"];
   const MAX_CORNER_RADIUS = 120;
@@ -513,12 +513,14 @@
   }
   const BUNDLED_FONT_FAMILIES = {
     serif: "Log Capture Serif",
+    ridi: "Log Capture RIDI Batang",
     sans: "Log Capture Sans",
     rounded: "Log Capture Rounded",
     mono: "Log Capture Mono"
   };
   const FONT_STACKS = {
     serif: `"${BUNDLED_FONT_FAMILIES.serif}", "Noto Serif KR", "AppleMyungjo", "Songti KR", serif`,
+    ridi: `"${BUNDLED_FONT_FAMILIES.ridi}", "RIDIBatang", "Noto Serif KR", "AppleMyungjo", serif`,
     sans: `"${BUNDLED_FONT_FAMILIES.sans}", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif`,
     rounded: `"${BUNDLED_FONT_FAMILIES.rounded}", ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", sans-serif`,
     mono: `"${BUNDLED_FONT_FAMILIES.mono}", ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace`
@@ -535,6 +537,13 @@
         family: BUNDLED_FONT_FAMILIES.serif,
         weight: "700",
         url: `${CDN_ROOT}/noto-serif-kr@5.3.0/korean-700-normal.woff2`
+      }
+    ],
+    ridi: [
+      {
+        family: BUNDLED_FONT_FAMILIES.ridi,
+        weight: "400",
+        url: "https://cdn.jsdelivr.net/gh/webfontworld/ridi/RidiBatang.woff2"
       }
     ],
     sans: [
@@ -1672,7 +1681,7 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
             <summary class="rc-group__title"><span>글자</span><span class="rc-summary-icon">${ICONS.chevronDown}</span></summary>
             <div class="rc-group__body">
               <div class="rc-row">
-                <div><label class="rc-label" for="rc-font">글꼴</label><select id="rc-font" class="rc-select"><option value="serif">명조/바탕</option><option value="sans">고딕</option><option value="rounded">둥근 고딕</option><option value="mono">고정폭</option></select></div>
+                <div><label class="rc-label" for="rc-font">글꼴</label><select id="rc-font" class="rc-select"><option value="serif">명조/바탕</option><option value="ridi">리디바탕</option><option value="sans">고딕</option><option value="rounded">둥근 고딕</option><option value="mono">고정폭</option></select></div>
                 <div><label class="rc-label" for="rc-text-color">글자 색 (HEX)</label><div class="rc-color-control"><input id="rc-text-color" class="rc-field rc-color-code" type="text" inputmode="text" maxlength="7" spellcheck="false" placeholder="#FFFFFF"><input id="rc-text-color-picker" class="rc-color-picker" type="color" aria-label="글자 색 선택"></div></div>
               </div>
               <div class="rc-control"><div class="rc-control__head"><label for="rc-font-size">글자 크기</label></div><div class="rc-number-control"><input id="rc-font-size" class="rc-range" type="range" min="14" max="72" step="1"><label class="rc-number-entry"><input id="rc-font-size-input" type="number" min="14" max="72" step="1" aria-label="글자 크기 직접 입력"><span>px</span></label></div></div>
