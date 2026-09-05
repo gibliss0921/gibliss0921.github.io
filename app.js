@@ -1662,7 +1662,7 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
 .rc-project-dialog { width: min(780px, 100%); }
 .rc-project-save-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: var(--rc-sp-xs);
   margin-top: var(--rc-sp-md);
 }
@@ -2017,7 +2017,8 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
           <p class="rc-preset-dialog__intro">본문·하단정보·치환규칙·디자인·배경사진까지 저장하고 나중에 그대로 다시 편집할 수 있습니다.</p>
           <div class="rc-project-save-row">
             <input id="rc-project-name" class="rc-field" type="text" maxlength="60" placeholder="작업물 이름">
-            <button id="rc-project-save-current" class="rc-button rc-button--primary" type="button">현재 작업 저장</button>
+            <button id="rc-project-save-new" class="rc-button rc-button--primary" type="button">새 작업으로 저장</button>
+            <button id="rc-project-overwrite" class="rc-button" type="button">현재 작업 덮어쓰기</button>
           </div>
           <div class="rc-project-transfer">
             <input id="rc-project-import-input" type="file" accept="application/json,.json" hidden>
@@ -2104,9 +2105,10 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
       element("rc-work-save").addEventListener("click", () => void this.quickSaveProject());
       element("rc-work-library").addEventListener("click", () => void this.showProjectModal());
       element("rc-project-modal-close").addEventListener("click", () => this.hideProjectModal());
-      element("rc-project-save-current").addEventListener("click", () => void this.saveProjectFromModal());
+      element("rc-project-save-new").addEventListener("click", () => void this.saveProjectAsNewFromModal());
+      element("rc-project-overwrite").addEventListener("click", () => void this.overwriteCurrentProjectFromModal());
       element("rc-project-name").addEventListener("keydown", (event) => {
-        if (event.key === "Enter") void this.saveProjectFromModal();
+        if (event.key === "Enter") void this.saveProjectAsNewFromModal();
       });
       const projectImportInput = element("rc-project-import-input");
       element("rc-project-import").addEventListener("click", () => projectImportInput.click());
@@ -3101,13 +3103,11 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
     }
     async quickSaveProject() {
       try {
-        let name = this.currentProjectName;
-        if (!this.currentProjectId) {
-          const entered = window.prompt("작업물 이름을 입력해 주세요.", this.deriveProjectName());
-          if (entered === null) return;
-          name = this.normalizeProjectName(entered);
-        }
-        await this.saveCurrentProject(name, this.currentProjectId);
+        const suggested = this.deriveProjectName();
+        const entered = window.prompt("새 작업물 이름을 입력해 주세요.", suggested);
+        if (entered === null) return;
+        const name = this.normalizeProjectName(entered);
+        await this.saveCurrentProject(name, null);
       } catch (error) {
         this.toast(error instanceof Error ? error.message : "작업물을 저장하지 못했습니다.", "error");
       }
@@ -3138,7 +3138,8 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
     async showProjectModal() {
       try {
         element("rc-project-modal").hidden = false;
-        element("rc-project-name").value = this.currentProjectName || this.deriveProjectName();
+        element("rc-project-name").value = this.deriveProjectName();
+        element("rc-project-overwrite").disabled = !this.currentProjectId;
         await this.renderProjectList();
         element("rc-project-name").focus();
         element("rc-project-name").select();
@@ -3152,12 +3153,25 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
       for (const url of this.projectThumbUrls) URL.revokeObjectURL(url);
       this.projectThumbUrls = [];
     }
-    async saveProjectFromModal() {
+    async saveProjectAsNewFromModal() {
       try {
         const name = this.normalizeProjectName(element("rc-project-name").value);
+        await this.saveCurrentProject(name, null);
+        element("rc-project-overwrite").disabled = false;
+      } catch (error) {
+        this.toast(error instanceof Error ? error.message : "새 작업물을 저장하지 못했습니다.", "error");
+      }
+    }
+    async overwriteCurrentProjectFromModal() {
+      try {
+        if (!this.currentProjectId) {
+          this.toast("먼저 저장함에서 작업물을 불러오거나 새 작업으로 저장해 주세요.", "error");
+          return;
+        }
+        const name = this.normalizeProjectName(element("rc-project-name").value || this.currentProjectName);
         await this.saveCurrentProject(name, this.currentProjectId);
       } catch (error) {
-        this.toast(error instanceof Error ? error.message : "작업물을 저장하지 못했습니다.", "error");
+        this.toast(error instanceof Error ? error.message : "현재 작업물을 덮어쓰지 못했습니다.", "error");
       }
     }
     formatProjectDate(timestamp) {
@@ -3231,6 +3245,7 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
         await this.applyWorkspaceSnapshot(project.snapshot, { tab: "content" });
         this.currentProjectId = project.id;
         this.currentProjectName = project.name;
+        element("rc-project-overwrite").disabled = false;
         await this.saveDraftNow();
         this.hideProjectModal();
         this.updateAutosaveStatus();
@@ -3267,6 +3282,7 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
       if (this.currentProjectId === id) {
         this.currentProjectId = null;
         this.currentProjectName = "";
+        element("rc-project-overwrite").disabled = true;
         await this.saveDraftNow();
       }
       await this.renderProjectList();
