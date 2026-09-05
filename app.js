@@ -33,6 +33,12 @@
   });
   const BUILTIN_PRESETS = [
     preset(
+      "builtin-ridi",
+      "리디",
+      { kind: "gradient", color1: "#211B2D", color2: "#48415F", texture: "stars" },
+      { overlay: 0.01, cornerRadius: 0, font: "ridi", fontSize: 24, lineHeight: 1.65, textColor: "#FFFFFF", align: "left", padding: 42 }
+    ),
+    preset(
       "builtin-charcoal",
       "차콜",
       { kind: "solid", color1: "#414B4B", color2: "#263131", texture: "grain" }
@@ -241,6 +247,146 @@
       persisted.lastStyle = { ...persisted.lastStyle, font: "serif" };
     }
     return persisted;
+  }
+  const WORKSPACE_DB_NAME = "log_capture_workspace_v1";
+  const WORKSPACE_DB_VERSION = 1;
+  const PROJECT_STORE = "projects";
+  const DRAFT_STORE = "drafts";
+  const CURRENT_DRAFT_ID = "current";
+  const MAX_PROJECT_BACKUP_BYTES = 100 * 1024 * 1024;
+  let workspaceDbPromise = null;
+  function openWorkspaceDb() {
+    if (workspaceDbPromise) return workspaceDbPromise;
+    workspaceDbPromise = new Promise((resolve, reject) => {
+      if (typeof indexedDB === "undefined") {
+        reject(new Error("이 브라우저는 작업물 저장함을 지원하지 않습니다."));
+        return;
+      }
+      const request = indexedDB.open(WORKSPACE_DB_NAME, WORKSPACE_DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(PROJECT_STORE)) {
+          const store = db.createObjectStore(PROJECT_STORE, { keyPath: "id" });
+          store.createIndex("updatedAt", "updatedAt");
+        }
+        if (!db.objectStoreNames.contains(DRAFT_STORE)) db.createObjectStore(DRAFT_STORE, { keyPath: "id" });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error("작업물 저장소를 열지 못했습니다."));
+      request.onblocked = () => reject(new Error("다른 탭에서 저장소 업데이트를 막고 있습니다."));
+    });
+    return workspaceDbPromise;
+  }
+  async function idbRequest(storeName, mode, operation) {
+    const db = await openWorkspaceDb();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(storeName, mode);
+      const store = transaction.objectStore(storeName);
+      let request;
+      try {
+        request = operation(store);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error("브라우저 저장소 작업에 실패했습니다."));
+    });
+  }
+  const workspaceGet = (storeName, key) => idbRequest(storeName, "readonly", (store) => store.get(key));
+  const workspaceGetAll = (storeName) => idbRequest(storeName, "readonly", (store) => store.getAll());
+  const workspacePut = (storeName, value) => idbRequest(storeName, "readwrite", (store) => store.put(value));
+  const workspaceDelete = (storeName, key) => idbRequest(storeName, "readwrite", (store) => store.delete(key));
+  function createWorkspaceId() {
+    try {
+      return `work-${crypto.randomUUID()}`;
+    } catch {
+      return `work-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+  }
+  function normalizeWorkspaceMetadata(value) {
+    const fallback = cloneMetadata();
+    if (!value || typeof value !== "object") return fallback;
+    const result = {
+      enabled: value.enabled !== false,
+      divider: value.divider !== false,
+      bot: { ...fallback.bot },
+      model: { ...fallback.model },
+      preset: { ...fallback.preset }
+    };
+    for (const key of ["bot", "model", "preset"]) {
+      const candidate = value[key];
+      if (!candidate || typeof candidate !== "object") continue;
+      result[key] = {
+        value: String(candidate.value ?? "").slice(0, key === "bot" ? 120 : 160),
+        visible: candidate.visible !== false
+      };
+    }
+    return result;
+  }
+  function normalizeWorkspaceRules(value) {
+    if (!Array.isArray(value)) return [newRule()];
+    const rules = value.slice(0, 100).map((candidate) => ({
+      id: typeof candidate?.id === "string" && candidate.id ? candidate.id : newRule().id,
+      find: String(candidate?.find ?? "").slice(0, 500),
+      replace: String(candidate?.replace ?? "").slice(0, 500),
+      caseSensitive: Boolean(candidate?.caseSensitive)
+    }));
+    return rules.length ? rules : [newRule()];
+  }
+  function plainWorkspaceSnapshot(snapshot) {
+    return {
+      version: 1,
+      text: String(snapshot?.text ?? ""),
+      metadata: normalizeWorkspaceMetadata(snapshot?.metadata),
+      rules: normalizeWorkspaceRules(snapshot?.rules),
+      style: normalizeStyle(snapshot?.style),
+      previousText: typeof snapshot?.previousText === "string" ? snapshot.previousText : null,
+      lastRuleCounts: Array.isArray(snapshot?.lastRuleCounts) ? snapshot.lastRuleCounts.slice(0, 100).map((value) => Math.max(0, Number(value) || 0)) : [],
+      usePhoto: Boolean(snapshot?.usePhoto),
+      photo: snapshot?.photo ?? null
+    };
+  }
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error ?? new Error("사진 데이터를 읽지 못했습니다."));
+      reader.readAsDataURL(blob);
+    });
+  }
+  function dataUrlToBlob(dataUrl) {
+    const match = /^data:([^;,]+)?(?:;base64)?,(.*)$/s.exec(dataUrl);
+    if (!match) throw new Error("백업의 사진 데이터가 올바르지 않습니다.");
+    const mime = match[1] || "application/octet-stream";
+    const payload = match[2];
+    const binary = atob(payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return new Blob([bytes], { type: mime });
+  }
+  async function snapshotToPortable(snapshot) {
+    const normalized = plainWorkspaceSnapshot(snapshot);
+    let photo = null;
+    if (normalized.photo?.blob instanceof Blob) {
+      photo = {
+        name: String(normalized.photo.name ?? "background-image"),
+        type: normalized.photo.blob.type || "application/octet-stream",
+        dataUrl: await blobToDataUrl(normalized.photo.blob)
+      };
+    }
+    return { ...normalized, photo };
+  }
+  async function portableToSnapshot(value) {
+    const normalized = plainWorkspaceSnapshot({ ...value, photo: null });
+    let photo = null;
+    if (value?.photo?.dataUrl && typeof value.photo.dataUrl === "string") {
+      const blob = dataUrlToBlob(value.photo.dataUrl);
+      if (!PHOTO_TYPES.has(blob.type)) throw new Error("백업에 지원하지 않는 배경 사진 형식이 있습니다.");
+      if (blob.size > MAX_PHOTO_BYTES) throw new Error("백업의 배경 사진이 20MB를 초과합니다.");
+      photo = { name: String(value.photo.name ?? "background-image"), blob };
+    }
+    return { ...normalized, photo, usePhoto: Boolean(normalized.usePhoto && photo) };
   }
   const CANVAS_WIDTH = 720;
   const MIN_CANVAS_HEIGHT = 240;
@@ -1494,6 +1640,101 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
   #rc-tab-style .rc-row { grid-template-columns: 1fr; }
 }
 
+
+.rc-work-savebar {
+  display: flex;
+  align-items: center;
+  gap: var(--rc-sp-xs);
+  padding: var(--rc-sp-sm) var(--rc-sp-md);
+  border-bottom: 1px solid var(--rc-rule);
+  background: var(--rc-paper);
+}
+.rc-work-savebar .rc-button { flex: 0 0 auto; }
+.rc-autosave-status {
+  margin-left: auto;
+  min-width: 0;
+  color: var(--rc-muted);
+  font-size: var(--rc-text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rc-project-dialog { width: min(780px, 100%); }
+.rc-project-save-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--rc-sp-xs);
+  margin-top: var(--rc-sp-md);
+}
+.rc-project-transfer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rc-sp-xs);
+  margin-top: var(--rc-sp-sm);
+}
+.rc-project-list {
+  display: grid;
+  gap: var(--rc-sp-sm);
+  margin-top: var(--rc-sp-lg);
+}
+.rc-project-card {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr);
+  gap: var(--rc-sp-md);
+  padding: var(--rc-sp-sm);
+  border: 1px solid var(--rc-rule);
+  border-radius: var(--rc-r-md);
+  background: var(--rc-paper);
+}
+.rc-project-thumb {
+  width: 116px;
+  height: 96px;
+  border-radius: var(--rc-r-sm);
+  background: var(--rc-paper-sunk);
+  object-fit: cover;
+}
+.rc-project-thumb--empty {
+  display: grid;
+  place-items: center;
+  color: var(--rc-muted);
+  font-size: var(--rc-text-sm);
+  text-align: center;
+}
+.rc-project-card__main { min-width: 0; }
+.rc-project-card__title {
+  margin: 0;
+  font-size: var(--rc-text-md);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rc-project-card__meta,
+.rc-project-card__preview {
+  margin: 4px 0 0;
+  color: var(--rc-muted);
+  font-size: var(--rc-text-sm);
+}
+.rc-project-card__preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rc-project-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--rc-sp-sm);
+}
+.rc-project-empty {
+  margin: var(--rc-sp-lg) 0 0;
+  padding: var(--rc-sp-lg);
+  border: 1px dashed var(--rc-rule);
+  border-radius: var(--rc-r-md);
+  color: var(--rc-muted);
+  text-align: center;
+}
+
 @media (max-width: 520px) {
   .rc-topbar__right { gap: 4px; }
   .rc-topbar { grid-template-columns: minmax(0, 1fr) auto; }
@@ -1524,6 +1765,11 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
   }
   .rc-replacement__case { margin-top: var(--rc-sp-2xs); }
   .rc-count { display: block; margin-top: var(--rc-sp-2xs); }
+  .rc-work-savebar { flex-wrap: wrap; padding: var(--rc-sp-xs) var(--rc-sp-sm); }
+  .rc-autosave-status { width: 100%; margin-left: 0; }
+  .rc-project-save-row { grid-template-columns: 1fr; }
+  .rc-project-card { grid-template-columns: 88px minmax(0, 1fr); gap: var(--rc-sp-sm); }
+  .rc-project-thumb { width: 88px; height: 78px; }
   .rc-photo-save-modal { padding: var(--rc-sp-xs); }
   .rc-photo-save-dialog { padding: var(--rc-sp-md); border-radius: var(--rc-r-md); }
   .rc-confirm-modal { padding: var(--rc-sp-xs); }
@@ -1590,7 +1836,7 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
         <div class="rc-topbar__right">
           <button id="rc-reset" class="rc-button" type="button">초기화</button>
           <button id="rc-detect" class="rc-button" type="button">정보 불러오기</button>
-          <button id="rc-save" class="rc-button rc-button--primary" type="button">저장</button>
+          <button id="rc-save" class="rc-button rc-button--primary" type="button">PNG 저장</button>
         </div>
       </header>
 
@@ -1616,6 +1862,12 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
               <button id="rc-tab-btn-content" class="rc-tab" type="button" role="tab" data-tab="content" aria-selected="true" aria-controls="rc-tab-content">내용</button>
               <button id="rc-tab-btn-style" class="rc-tab" type="button" role="tab" data-tab="style" aria-selected="false" aria-controls="rc-tab-style">디자인</button>
             </div>
+          </div>
+
+          <div class="rc-work-savebar" aria-label="작업물 저장">
+            <button id="rc-work-save" class="rc-button rc-button--primary" type="button">작업 저장</button>
+            <button id="rc-work-library" class="rc-button" type="button">저장함</button>
+            <span id="rc-autosave-status" class="rc-autosave-status" aria-live="polite">자동저장 준비 중</span>
           </div>
 
           <div id="rc-tab-content" class="rc-tabpanel" role="tabpanel" aria-labelledby="rc-tab-btn-content">
@@ -1758,6 +2010,25 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
           </div>
         </section>
       </div>
+      <div id="rc-project-modal" class="rc-preset-modal" hidden>
+        <section class="rc-preset-dialog rc-project-dialog" role="dialog" aria-modal="true" aria-labelledby="rc-project-modal-title">
+          <button id="rc-project-modal-close" class="rc-button rc-button--quiet rc-icon-button rc-preset-dialog__close" type="button" aria-label="작업물 저장함 닫기">${ICONS.x}</button>
+          <h2 id="rc-project-modal-title">작업물 저장함</h2>
+          <p class="rc-preset-dialog__intro">본문·하단정보·치환규칙·디자인·배경사진까지 저장하고 나중에 그대로 다시 편집할 수 있습니다.</p>
+          <div class="rc-project-save-row">
+            <input id="rc-project-name" class="rc-field" type="text" maxlength="60" placeholder="작업물 이름">
+            <button id="rc-project-save-current" class="rc-button rc-button--primary" type="button">현재 작업 저장</button>
+          </div>
+          <div class="rc-project-transfer">
+            <input id="rc-project-import-input" type="file" accept="application/json,.json" hidden>
+            <button id="rc-project-import" class="rc-button" type="button">백업 가져오기</button>
+            <button id="rc-project-export-all" class="rc-button" type="button">전체 백업 JSON</button>
+          </div>
+          <p class="rc-help">작업물은 이 브라우저의 IndexedDB에 저장됩니다. 다른 컴퓨터로 옮길 때는 전체 백업 JSON을 사용하세요.</p>
+          <p id="rc-project-empty" class="rc-project-empty" hidden>아직 저장한 작업물이 없습니다.</p>
+          <div id="rc-project-list" class="rc-project-list"></div>
+        </section>
+      </div>
       <div id="rc-toast" class="rc-toast" role="status" aria-live="polite"></div>
     </div>
   `;
@@ -1782,6 +2053,12 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
     lastRuleCounts = [];
     photoSaveUrl = null;
     pendingPhotoSave = null;
+    draftTimer = null;
+    draftReady = false;
+    suspendDraft = false;
+    currentProjectId = null;
+    currentProjectName = "";
+    projectThumbUrls = [];
     constructor(persisted) {
       const styleElement = document.createElement("style");
       styleElement.textContent = APP_STYLES;
@@ -1800,14 +2077,23 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
     }
     async open() {
       this.root.hidden = false;
+      try {
+        await this.restoreAutosaveDraft();
+      } catch (error) {
+        console.warn("[Log Capture] 자동저장 복원 실패", error);
+      }
+      this.draftReady = true;
       this.scheduleRender();
+      this.scheduleDraftSave();
     }
     async close() {
       this.closeMobilePreview();
       this.settleConfirm(false, false);
       this.hidePhotoSaveModal();
       this.hidePresetModal();
+      this.hideProjectModal();
       await this.persistNow();
+      await this.saveDraftNow();
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
     bindEvents() {
@@ -1815,6 +2101,24 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
       element("rc-reset").addEventListener("click", () => void this.confirmReset());
       element("rc-detect").addEventListener("click", () => void this.fillDetectedMetadata(true));
       element("rc-save").addEventListener("click", () => void this.exportImage());
+      element("rc-work-save").addEventListener("click", () => void this.quickSaveProject());
+      element("rc-work-library").addEventListener("click", () => void this.showProjectModal());
+      element("rc-project-modal-close").addEventListener("click", () => this.hideProjectModal());
+      element("rc-project-save-current").addEventListener("click", () => void this.saveProjectFromModal());
+      element("rc-project-name").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") void this.saveProjectFromModal();
+      });
+      const projectImportInput = element("rc-project-import-input");
+      element("rc-project-import").addEventListener("click", () => projectImportInput.click());
+      projectImportInput.addEventListener("change", () => void this.importWorkspaceBackup(projectImportInput.files?.[0]));
+      element("rc-project-export-all").addEventListener("click", () => void this.exportWorkspaceBackup());
+      const projectModal = element("rc-project-modal");
+      projectModal.addEventListener("click", (event) => {
+        if (event.target === projectModal) this.hideProjectModal();
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") void this.saveDraftNow();
+      });
       element("rc-preview-expand").addEventListener("click", () => this.openMobilePreview());
       element("rc-preview-close").addEventListener("click", () => this.closeMobilePreview());
       element("rc-preview-collapse").addEventListener("click", () => this.togglePreviewCollapse());
@@ -1874,6 +2178,7 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
         this.captureRuleInputs();
         this.rules.push(newRule());
         this.renderReplacementRules();
+        this.scheduleDraftSave();
       });
       element("rc-apply-rules").addEventListener("click", () => this.applyRules());
       element("rc-undo-rules").addEventListener("click", () => this.undoRules());
@@ -1952,6 +2257,7 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
       document.addEventListener("keydown", (event) => {
         if (event.key !== "Escape") return;
         if (!confirmModal.hidden) this.settleConfirm(false);
+        else if (!element("rc-project-modal").hidden) this.hideProjectModal();
         else if (!presetModal.hidden) this.hidePresetModal();
       });
       element("rc-texture").addEventListener("input", () => {
@@ -2055,6 +2361,10 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
       });
     }
     syncAllControls() {
+      for (const [key, inputId, checkboxId] of METADATA_BINDINGS) {
+        element(inputId).value = this.metadata[key].value;
+        element(checkboxId).checked = this.metadata[key].visible;
+      }
       element("rc-texture").value = this.style.background.texture;
       element("rc-font").value = this.style.font;
       element(this.style.align === "center" ? "rc-align-center" : "rc-align-left").checked = true;
@@ -2148,6 +2458,7 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
     }
     scheduleRender() {
       element("rc-save").disabled = true;
+      if (this.draftReady && !this.suspendDraft) this.scheduleDraftSave();
       if (this.renderFrame !== null) cancelAnimationFrame(this.renderFrame);
       const request = ++this.renderRequest;
       this.renderFrame = requestAnimationFrame(() => {
@@ -2237,7 +2548,7 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
       this.confirmResolve = null;
       if (!modal.hidden) {
         modal.hidden = true;
-        const returnTarget = element("rc-preset-modal").hidden ? element("rc-reset") : element("rc-preset-modal-close");
+        const returnTarget = !element("rc-project-modal").hidden ? element("rc-project-modal-close") : element("rc-preset-modal").hidden ? element("rc-reset") : element("rc-preset-modal-close");
         if (restoreFocus && !this.root.hidden) returnTarget.focus();
       }
       resolve?.(accepted);
@@ -2268,6 +2579,8 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
       element("rc-photo-input").value = "";
       this.style = cloneStyle(DEFAULT_STYLE);
       this.activePresetId = null;
+      this.currentProjectId = null;
+      this.currentProjectName = "";
       element("rc-preset-name").value = "";
       this.renderError = null;
       this.closeMobilePreview();
@@ -2320,10 +2633,18 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
           if (!this.rules.length) this.rules.push(newRule());
           this.lastRuleCounts = [];
           this.renderReplacementRules([]);
+          this.scheduleRender();
         });
         const count = document.createElement("span");
         count.className = "rc-count";
         count.textContent = counts[index] ? `${counts[index]}회` : "";
+        const changed = () => {
+          this.captureRuleInputs();
+          this.scheduleDraftSave();
+        };
+        find.addEventListener("input", changed);
+        replace.addEventListener("input", changed);
+        caseInput.addEventListener("change", changed);
         row.append(find, arrow, replace, caseLabel, remove, count);
         container.appendChild(row);
       });
@@ -2629,7 +2950,7 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
       if (file.size > MAX_PHOTO_BYTES) return this.toast("배경 사진은 20MB 이하여야 합니다.", "error");
       try {
         const image = await this.loadImage(file);
-        this.photo = { image, name: file.name };
+        this.photo = { image, name: file.name, blob: file };
         this.usePhoto = true;
         this.updatePhotoStatus();
         this.scheduleRender();
@@ -2656,6 +2977,395 @@ button, summary, input, textarea, select { -webkit-tap-highlight-color: transpar
       element("rc-photo-clear").disabled = !this.photo;
       element("rc-photo-status").textContent = this.photo ? `${this.photo.name} · ${this.usePhoto ? "배경으로 사용 중" : "보관됨, 배경 유형에서 사진을 고르면 적용됩니다"}` : "선택한 사진이 없습니다. PNG·JPEG·WebP, 최대 20MB";
       this.updateBackgroundControls();
+    }
+    deriveProjectName() {
+      const text = element("rc-text").value.trim();
+      const firstLine = text.split(/\r?\n/u).find((line) => line.trim())?.trim().replace(/^>\s*/u, "").replace(/[*_`]/gu, "") ?? "";
+      if (firstLine) return Array.from(firstLine).slice(0, 36).join("");
+      const date = new Date();
+      return `작업 ${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+    }
+    normalizeProjectName(value) {
+      const name = String(value ?? "").trim().replace(/\s+/gu, " ");
+      if (!name) throw new Error("작업물 이름을 입력해 주세요.");
+      if (Array.from(name).length > 60) throw new Error("작업물 이름은 60자 이하여야 합니다.");
+      return name;
+    }
+    captureWorkspaceSnapshot() {
+      this.captureRuleInputs();
+      return {
+        version: 1,
+        text: element("rc-text").value,
+        metadata: normalizeWorkspaceMetadata(this.metadata),
+        rules: normalizeWorkspaceRules(this.rules),
+        style: cloneStyle(this.style),
+        previousText: this.previousText,
+        lastRuleCounts: this.lastRuleCounts.slice(),
+        usePhoto: Boolean(this.usePhoto && this.photo),
+        photo: this.photo?.blob instanceof Blob ? { name: this.photo.name, blob: this.photo.blob } : null
+      };
+    }
+    async applyWorkspaceSnapshot(snapshot, options = {}) {
+      const normalized = plainWorkspaceSnapshot(snapshot);
+      this.suspendDraft = true;
+      try {
+        element("rc-text").value = normalized.text;
+        this.metadata = normalizeWorkspaceMetadata(normalized.metadata);
+        this.rules = normalizeWorkspaceRules(normalized.rules);
+        this.previousText = normalized.previousText;
+        this.lastRuleCounts = normalized.lastRuleCounts;
+        element("rc-undo-rules").disabled = typeof this.previousText !== "string";
+        element("rc-replacement-result").textContent = "";
+        this.style = normalizeStyle(normalized.style);
+        this.activePresetId = null;
+        this.photo = null;
+        this.usePhoto = false;
+        element("rc-photo-input").value = "";
+        if (normalized.photo?.blob instanceof Blob) {
+          const image = await this.loadImage(normalized.photo.blob);
+          this.photo = { image, name: String(normalized.photo.name ?? "background-image"), blob: normalized.photo.blob };
+          this.usePhoto = Boolean(normalized.usePhoto);
+        }
+        this.syncAllControls();
+        this.renderReplacementRules();
+        this.updatePresetSelection();
+        this.scheduleRender();
+        if (options.tab) this.showTab(options.tab);
+      } finally {
+        this.suspendDraft = false;
+      }
+    }
+    updateAutosaveStatus(message) {
+      const status = element("rc-autosave-status");
+      if (message) {
+        status.textContent = message;
+        return;
+      }
+      const suffix = this.currentProjectName ? ` · ${this.currentProjectName}` : "";
+      status.textContent = `자동저장됨${suffix}`;
+    }
+    scheduleDraftSave() {
+      if (!this.draftReady || this.suspendDraft) return;
+      if (this.draftTimer !== null) clearTimeout(this.draftTimer);
+      this.updateAutosaveStatus("자동저장 중…");
+      this.draftTimer = window.setTimeout(() => {
+        this.draftTimer = null;
+        void this.saveDraftNow();
+      }, 650);
+    }
+    async saveDraftNow() {
+      if (!this.draftReady || this.suspendDraft) return;
+      if (this.draftTimer !== null) {
+        clearTimeout(this.draftTimer);
+        this.draftTimer = null;
+      }
+      try {
+        await workspacePut(DRAFT_STORE, {
+          id: CURRENT_DRAFT_ID,
+          updatedAt: Date.now(),
+          projectId: this.currentProjectId,
+          projectName: this.currentProjectName,
+          snapshot: this.captureWorkspaceSnapshot()
+        });
+        this.updateAutosaveStatus();
+      } catch (error) {
+        console.warn("[Log Capture] 자동저장 실패", error);
+        this.updateAutosaveStatus("자동저장 실패");
+      }
+    }
+    async restoreAutosaveDraft() {
+      const draft = await workspaceGet(DRAFT_STORE, CURRENT_DRAFT_ID);
+      if (!draft?.snapshot) return;
+      await this.applyWorkspaceSnapshot(draft.snapshot);
+      this.currentProjectId = typeof draft.projectId === "string" ? draft.projectId : null;
+      this.currentProjectName = typeof draft.projectName === "string" ? draft.projectName : "";
+      this.updateAutosaveStatus("마지막 작업 복원됨");
+      window.setTimeout(() => this.updateAutosaveStatus(), 1800);
+    }
+    async createThumbnailBlob() {
+      try {
+        const source = document.createElement("canvas");
+        await renderQuoteToCanvas(source, this.getRenderInput());
+        const width = 240;
+        const height = Math.max(80, Math.min(320, Math.round(source.height * width / source.width)));
+        const thumbnail = document.createElement("canvas");
+        thumbnail.width = width;
+        thumbnail.height = height;
+        const context = thumbnail.getContext("2d");
+        if (!context) return null;
+        context.drawImage(source, 0, 0, source.width, source.height, 0, 0, width, height);
+        return await new Promise((resolve) => thumbnail.toBlob(resolve, "image/jpeg", 0.78));
+      } catch {
+        return null;
+      }
+    }
+    async quickSaveProject() {
+      try {
+        let name = this.currentProjectName;
+        if (!this.currentProjectId) {
+          const entered = window.prompt("작업물 이름을 입력해 주세요.", this.deriveProjectName());
+          if (entered === null) return;
+          name = this.normalizeProjectName(entered);
+        }
+        await this.saveCurrentProject(name, this.currentProjectId);
+      } catch (error) {
+        this.toast(error instanceof Error ? error.message : "작업물을 저장하지 못했습니다.", "error");
+      }
+    }
+    async saveCurrentProject(name, existingId = null) {
+      const normalizedName = this.normalizeProjectName(name);
+      const now = Date.now();
+      let previous = null;
+      if (existingId) previous = await workspaceGet(PROJECT_STORE, existingId);
+      const id = previous?.id ?? existingId ?? createWorkspaceId();
+      const record = {
+        id,
+        name: normalizedName,
+        createdAt: previous?.createdAt ?? now,
+        updatedAt: now,
+        snapshot: this.captureWorkspaceSnapshot(),
+        thumbnail: await this.createThumbnailBlob()
+      };
+      await workspacePut(PROJECT_STORE, record);
+      this.currentProjectId = id;
+      this.currentProjectName = normalizedName;
+      element("rc-project-name").value = normalizedName;
+      await this.saveDraftNow();
+      this.updateAutosaveStatus();
+      this.toast(`“${normalizedName}” 작업물을 저장했습니다.`);
+      if (!element("rc-project-modal").hidden) await this.renderProjectList();
+    }
+    async showProjectModal() {
+      try {
+        element("rc-project-modal").hidden = false;
+        element("rc-project-name").value = this.currentProjectName || this.deriveProjectName();
+        await this.renderProjectList();
+        element("rc-project-name").focus();
+        element("rc-project-name").select();
+      } catch (error) {
+        element("rc-project-modal").hidden = true;
+        this.toast(error instanceof Error ? error.message : "작업물 저장함을 열지 못했습니다.", "error");
+      }
+    }
+    hideProjectModal() {
+      element("rc-project-modal").hidden = true;
+      for (const url of this.projectThumbUrls) URL.revokeObjectURL(url);
+      this.projectThumbUrls = [];
+    }
+    async saveProjectFromModal() {
+      try {
+        const name = this.normalizeProjectName(element("rc-project-name").value);
+        await this.saveCurrentProject(name, this.currentProjectId);
+      } catch (error) {
+        this.toast(error instanceof Error ? error.message : "작업물을 저장하지 못했습니다.", "error");
+      }
+    }
+    formatProjectDate(timestamp) {
+      const date = new Date(timestamp);
+      return new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium", timeStyle: "short" }).format(date);
+    }
+    async renderProjectList() {
+      const list = element("rc-project-list");
+      const empty = element("rc-project-empty");
+      for (const url of this.projectThumbUrls) URL.revokeObjectURL(url);
+      this.projectThumbUrls = [];
+      list.replaceChildren();
+      let projects = await workspaceGetAll(PROJECT_STORE);
+      projects = projects.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      empty.hidden = projects.length > 0;
+      for (const project of projects) {
+        const card = document.createElement("article");
+        card.className = "rc-project-card";
+        let thumb;
+        if (project.thumbnail instanceof Blob) {
+          thumb = document.createElement("img");
+          thumb.className = "rc-project-thumb";
+          thumb.alt = "";
+          const url = URL.createObjectURL(project.thumbnail);
+          this.projectThumbUrls.push(url);
+          thumb.src = url;
+        } else {
+          thumb = document.createElement("div");
+          thumb.className = "rc-project-thumb rc-project-thumb--empty";
+          thumb.textContent = "미리보기 없음";
+        }
+        const main = document.createElement("div");
+        main.className = "rc-project-card__main";
+        const title = document.createElement("h3");
+        title.className = "rc-project-card__title";
+        title.textContent = project.name;
+        const meta = document.createElement("p");
+        meta.className = "rc-project-card__meta";
+        const hasPhoto = project.snapshot?.photo?.blob instanceof Blob;
+        meta.textContent = `${this.formatProjectDate(project.updatedAt)}${hasPhoto ? " · 배경사진 포함" : ""}${project.id === this.currentProjectId ? " · 현재 작업" : ""}`;
+        const preview = document.createElement("p");
+        preview.className = "rc-project-card__preview";
+        preview.textContent = String(project.snapshot?.text ?? "").trim().replace(/\s+/gu, " ") || "본문 없음";
+        const actions = document.createElement("div");
+        actions.className = "rc-project-card__actions";
+        const load = document.createElement("button");
+        load.className = "rc-button rc-button--primary";
+        load.type = "button";
+        load.textContent = "불러오기";
+        load.addEventListener("click", () => void this.loadProject(project.id));
+        const rename = document.createElement("button");
+        rename.className = "rc-button";
+        rename.type = "button";
+        rename.textContent = "이름 변경";
+        rename.addEventListener("click", () => void this.renameProject(project.id));
+        const remove = document.createElement("button");
+        remove.className = "rc-button rc-button--danger";
+        remove.type = "button";
+        remove.textContent = "삭제";
+        remove.addEventListener("click", () => void this.deleteProject(project.id));
+        actions.append(load, rename, remove);
+        main.append(title, meta, preview, actions);
+        card.append(thumb, main);
+        list.append(card);
+      }
+    }
+    async loadProject(id) {
+      try {
+        const project = await workspaceGet(PROJECT_STORE, id);
+        if (!project) throw new Error("작업물을 찾지 못했습니다.");
+        await this.applyWorkspaceSnapshot(project.snapshot, { tab: "content" });
+        this.currentProjectId = project.id;
+        this.currentProjectName = project.name;
+        await this.saveDraftNow();
+        this.hideProjectModal();
+        this.updateAutosaveStatus();
+        this.toast(`“${project.name}” 작업물을 불러왔습니다.`);
+      } catch (error) {
+        this.toast(error instanceof Error ? error.message : "작업물을 불러오지 못했습니다.", "error");
+      }
+    }
+    async renameProject(id) {
+      const project = await workspaceGet(PROJECT_STORE, id);
+      if (!project) return;
+      const entered = window.prompt("새 작업물 이름", project.name);
+      if (entered === null) return;
+      try {
+        project.name = this.normalizeProjectName(entered);
+        project.updatedAt = Date.now();
+        await workspacePut(PROJECT_STORE, project);
+        if (this.currentProjectId === id) {
+          this.currentProjectName = project.name;
+          await this.saveDraftNow();
+        }
+        await this.renderProjectList();
+        this.updateAutosaveStatus();
+      } catch (error) {
+        this.toast(error instanceof Error ? error.message : "이름을 바꾸지 못했습니다.", "error");
+      }
+    }
+    async deleteProject(id) {
+      const project = await workspaceGet(PROJECT_STORE, id);
+      if (!project) return;
+      const accepted = await this.askConfirm("작업물 삭제", `“${project.name}” 작업물을 삭제할까요?`, "삭제");
+      if (!accepted) return;
+      await workspaceDelete(PROJECT_STORE, id);
+      if (this.currentProjectId === id) {
+        this.currentProjectId = null;
+        this.currentProjectName = "";
+        await this.saveDraftNow();
+      }
+      await this.renderProjectList();
+      this.updateAutosaveStatus();
+    }
+    async exportWorkspaceBackup() {
+      try {
+        const projects = await workspaceGetAll(PROJECT_STORE);
+        const draft = await workspaceGet(DRAFT_STORE, CURRENT_DRAFT_ID);
+        if (!projects.length && !draft?.snapshot) throw new Error("백업할 작업물이 없습니다.");
+        const portableProjects = [];
+        for (const project of projects) {
+          portableProjects.push({
+            name: project.name,
+            createdAt: project.createdAt,
+            updatedAt: project.updatedAt,
+            snapshot: await snapshotToPortable(project.snapshot)
+          });
+        }
+        const portableDraft = draft?.snapshot ? {
+          projectName: draft.projectName || "",
+          updatedAt: draft.updatedAt,
+          snapshot: await snapshotToPortable(draft.snapshot)
+        } : null;
+        const bundle = {
+          format: "log-capture-workspace-backup",
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          projects: portableProjects,
+          draft: portableDraft
+        };
+        const blob = new Blob([JSON.stringify(bundle)], { type: "application/json;charset=utf-8" });
+        const date = new Date();
+        const filename = `log-capture-workspace-${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}.json`;
+        this.downloadBlob(blob, filename);
+        this.toast(`${portableProjects.length}개 작업물을 백업했습니다.`);
+      } catch (error) {
+        this.toast(error instanceof Error ? error.message : "작업물 백업에 실패했습니다.", "error");
+      }
+    }
+    async uniqueImportedProjectName(name, usedNames) {
+      const base = this.normalizeProjectName(name || "가져온 작업");
+      if (!usedNames.has(base.toLocaleLowerCase())) return base;
+      for (let index = 1; index < 10000; index += 1) {
+        const suffix = index === 1 ? " (가져옴)" : ` (가져옴 ${index})`;
+        const candidate = `${Array.from(base).slice(0, Math.max(1, 60 - Array.from(suffix).length)).join("")}${suffix}`;
+        if (!usedNames.has(candidate.toLocaleLowerCase())) return candidate;
+      }
+      return `가져온 작업 ${Date.now()}`;
+    }
+    async importWorkspaceBackup(file) {
+      const input = element("rc-project-import-input");
+      if (!file) return;
+      try {
+        if (file.size > MAX_PROJECT_BACKUP_BYTES) throw new Error("작업물 백업 파일은 100MB 이하여야 합니다.");
+        const value = JSON.parse(await file.text());
+        if (value?.format !== "log-capture-workspace-backup" || value.version !== 1 || !Array.isArray(value.projects)) {
+          throw new Error("Log Capture 작업물 백업 파일 형식이 아닙니다.");
+        }
+        const existing = await workspaceGetAll(PROJECT_STORE);
+        const usedNames = new Set(existing.map((item) => String(item.name ?? "").toLocaleLowerCase()));
+        let imported = 0;
+        for (const candidate of value.projects.slice(0, 200)) {
+          if (!candidate?.snapshot) continue;
+          const snapshot = await portableToSnapshot(candidate.snapshot);
+          const name = await this.uniqueImportedProjectName(candidate.name || "가져온 작업", usedNames);
+          usedNames.add(name.toLocaleLowerCase());
+          const now = Date.now();
+          await workspacePut(PROJECT_STORE, {
+            id: createWorkspaceId(),
+            name,
+            createdAt: Number(candidate.createdAt) || now,
+            updatedAt: Number(candidate.updatedAt) || now,
+            snapshot,
+            thumbnail: null
+          });
+          imported += 1;
+        }
+        if (value.draft?.snapshot) {
+          const snapshot = await portableToSnapshot(value.draft.snapshot);
+          const draftName = await this.uniqueImportedProjectName(value.draft.projectName || "가져온 자동저장", usedNames);
+          await workspacePut(PROJECT_STORE, {
+            id: createWorkspaceId(),
+            name: draftName,
+            createdAt: Date.now(),
+            updatedAt: Number(value.draft.updatedAt) || Date.now(),
+            snapshot,
+            thumbnail: null
+          });
+          imported += 1;
+        }
+        if (!imported) throw new Error("가져올 수 있는 작업물이 없습니다.");
+        await this.renderProjectList();
+        this.toast(`${imported}개 작업물을 가져왔습니다.`);
+      } catch (error) {
+        this.toast(error instanceof Error ? error.message : "작업물 백업을 읽지 못했습니다.", "error");
+      } finally {
+        input.value = "";
+      }
     }
     async exportImage() {
       const text = element("rc-text").value;
